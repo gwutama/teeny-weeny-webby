@@ -273,6 +273,9 @@ std::string Server::execute_cgi(const std::string& path, const std::string& quer
         close(pipe_in[0]);  // Close unused read end
         close(pipe_out[1]); // Close unused write end
 
+        // Set the alarm to trigger after x seconds
+        alarm(client_timeout);
+
         write(pipe_in[1], post_data.c_str(), post_data.size());
         close(pipe_in[1]); // Done writing
 
@@ -285,6 +288,9 @@ std::string Server::execute_cgi(const std::string& path, const std::string& quer
             output += buffer;
         }
         close(pipe_out[0]);
+
+        // Cancel the alarm after reading the output
+        alarm(0);
 
         int status;
         waitpid(pid, &status, 0);  // Wait for the child process to finish
