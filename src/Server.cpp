@@ -1,4 +1,3 @@
-#include <iostream>
 #include <syslog.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -8,6 +7,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <dirent.h>
+#include <sys/wait.h>
 
 #include "Server.h"
 #include "FileUtils.h"
@@ -15,6 +15,8 @@
 #include "MultipartParser.h"
 #include "Request.h"
 #include "Response.h"
+#include "RawResponse.h"
+
 
 Server* global_server_instance = nullptr;
 
@@ -96,60 +98,88 @@ void Server::signal_handler(int signal) {
 
 void Server::handle_client(int client_socket, const std::string& client_ip) {
     Request request(client_socket, buffer_size);
-    Response response;
 
     std::string request_type = request.get_type();
     log_event("Request: " + request_type + " " + request.get_path() + " from " + client_ip, LOG_INFO);
 
     if (request_type == "GET") {
-        response = handle_get_request(request, client_ip);
-    } else if (request_type == "POST") {
-        response = handle_post_request(request, client_ip);
-    } else {
-        response.set_status_code(405);
-        response.set_body("Method Not Allowed");
-    }
+        auto response = handle_get_request(request, client_ip);
+        std::string built_response = response->build_response();
 
-    std::string built_response = response.build_response();
-    send(client_socket, built_response.c_str(), built_response.size(), 0);
-    log_event("Response: " + std::to_string(response.get_status_code()) + " sent to " + client_ip, LOG_INFO);
-    close(client_socket);
+        send(client_socket, built_response.c_str(), built_response.size(), 0);
+        log_event("Sent " + std::to_string(built_response.size()) + " bytes to " + client_ip, LOG_INFO);
+        close(client_socket);
+    } else if (request_type == "POST") {
+        auto response = handle_post_request(request, client_ip);
+        std::string built_response = response->build_response();
+
+        send(client_socket, built_response.c_str(), built_response.size(), 0);
+        log_event("Sent " + std::to_string(built_response.size()) + " bytes to " + client_ip, LOG_INFO);
+        close(client_socket);
+    } else {
+        auto response = std::make_unique<Response>();
+        response->set_status_code(405);
+        response->set_body("Method Not Allowed");
+        std::string built_response = response->build_response();
+
+        send(client_socket, built_response.c_str(), built_response.size(), 0);
+        log_event("Sent " + std::to_string(built_response.size()) + " bytes to " + client_ip, LOG_INFO);
+        close(client_socket);
+    }
 }
 
-Response Server::handle_get_request(const Request& request, const std::string& client_ip) {
-    Response response;
+std::unique_ptr<ResponseBase> Server::handle_get_request(const Request& request, const std::string& client_ip) {
     std::string path = request.get_path();
+
     if (path.find("/cgi-bin/") == 0) {
         std::string query_string = request.get_query_string();
-        std::string cgi_output = execute_cgi(path, query_string, "", "GET", "", 0, client_ip);
-        response.set_body(cgi_output);
+
+        // get the name of the cgi script after /cgi-bin/
+        std::string script_name = path.substr(8);
+        std::string cgi_script_path = cgi_bin_dir + script_name;
+
+        std::string cgi_output = execute_cgi(cgi_script_path, query_string, "", "GET", "", 0, client_ip);
+
+        auto response = std::make_unique<RawResponse>();
+        response->set_raw_response(cgi_output);
+        return response;
     } else {
         std::string content = FileUtils::read_file(root_dir + path);
+        auto response = std::make_unique<Response>();
+
         if (content.empty()) {
-            response.set_status_code(404);
-            response.set_body("Not Found");
+            response->set_status_code(404);
+            response->set_body("Not Found");
             log_event("File not found: " + path + " requested by " + client_ip, LOG_WARNING);
         } else {
             std::string extension = FileUtils::get_file_extension(path);
             std::string mime_type = FileUtils::get_mime_type(extension);
-            response.set_content_type(mime_type);
-            response.set_body(content);
+            response->set_content_type(mime_type);
+            response->set_body(content);
             log_event("File served: " + path + " to " + client_ip + " with MIME type: " + mime_type, LOG_INFO);
         }
+
+        return response;
     }
-    return response;
 }
 
-Response Server::handle_post_request(const Request& request, const std::string& client_ip) {
-    Response response;
+std::unique_ptr<ResponseBase> Server::handle_post_request(const Request& request, const std::string& client_ip) {
     std::string path = request.get_path();
     std::string content_type = request.get_header("Content-Type");
 
     if (path.find("/cgi-bin/") == 0) {
         int content_length = std::stoi(request.get_header("Content-Length"));
         std::string post_data = request.get_body();
+
+        // get the name of the cgi script after /cgi-bin/
+        std::string script_name = path.substr(8);
+        std::string cgi_script_path = cgi_bin_dir + script_name;
+
         std::string cgi_output = execute_cgi(path, "", post_data, "POST", content_type, content_length, client_ip);
-        response.set_body(cgi_output);
+
+        auto response = std::make_unique<RawResponse>();
+        response->set_raw_response(cgi_output);
+        return response;
     } else if (content_type.find("multipart/form-data") != std::string::npos) {
         // Handle file uploads
         size_t boundary_pos = content_type.find("boundary=");
@@ -165,75 +195,104 @@ Response Server::handle_post_request(const Request& request, const std::string& 
             log_event("File uploaded by " + client_ip + " saved as " + guid, LOG_INFO);
         }
 
-        response.set_status_code(200);
-        response.set_body("File(s) uploaded successfully");
+        auto response = std::make_unique<Response>();
+        response->set_status_code(200);
+        response->set_body("File(s) uploaded successfully");
+        return response;
     } else {
-        response.set_status_code(400);
-        response.set_body("Bad Request");
+        auto response = std::make_unique<Response>();
+        response->set_status_code(400);
+        response->set_body("Bad Request");
+        return response;
     }
-    return response;
 }
 
 std::string Server::execute_cgi(const std::string& path, const std::string& query_string, const std::string& post_data, const std::string& request_method, const std::string& content_type, int content_length, const std::string& client_ip) {
+    // Check if the CGI script exists and is executable
+    if (!FileUtils::file_exists_and_is_executable(path)) {
+        log_event("CGI script not found or not executable: " + path, LOG_ERR);
+        Response response;
+        response.set_status_code(500);
+        response.set_body("Internal Server Error");
+        return response.build_response();
+    }
+
     int pipe_in[2];
     int pipe_out[2];
-    pipe(pipe_in);
-    pipe(pipe_out);
+
+    if (pipe(pipe_in) == -1 || pipe(pipe_out) == -1) {
+        log_event("Failed to create pipes", LOG_ERR);
+        Response response;
+        response.set_status_code(500);
+        response.set_body("Internal Server Error");
+        return response.build_response();
+    }
 
     pid_t pid = fork();
-    if (pid == 0) {
-        // Child process
-        dup2(pipe_in[0], STDIN_FILENO);
-        dup2(pipe_out[1], STDOUT_FILENO);
-        close(pipe_in[1]);
-        close(pipe_out[0]);
+    if (pid == -1) {
+        log_event("Failed to fork CGI process", LOG_ERR);
+        Response response;
+        response.set_status_code(500);
+        response.set_body("Internal Server Error");
+        return response.build_response();
+    }
+
+    if (pid == 0) { // Child process
+        close(pipe_in[1]);  // Close unused write end
+        close(pipe_out[0]); // Close unused read end
+
+        dup2(pipe_in[0], STDIN_FILENO);  // Redirect stdin to pipe_in
+        dup2(pipe_out[1], STDOUT_FILENO); // Redirect stdout to pipe_out
+        dup2(pipe_out[1], STDERR_FILENO); // Redirect stderr to pipe_out
+
+        close(pipe_in[0]);
+        close(pipe_out[1]);
 
         // Set CGI environment variables
         setenv("REQUEST_METHOD", request_method.c_str(), 1);
         setenv("QUERY_STRING", query_string.c_str(), 1);
         setenv("SCRIPT_NAME", path.c_str(), 1);
-
-        char hostname[1024];
-        gethostname(hostname, 1024);
-        setenv("SERVER_NAME", hostname, 1);
-
-        setenv("SERVER_PORT", std::to_string(port).c_str(), 1);
-        setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
         setenv("CONTENT_LENGTH", std::to_string(content_length).c_str(), 1);
         setenv("CONTENT_TYPE", content_type.c_str(), 1);
         setenv("GATEWAY_INTERFACE", "CGI/1.1", 1);
-        setenv("REMOTE_ADDR", client_ip.c_str(), 1);  // Set client IP address
+        setenv("REMOTE_ADDR", client_ip.c_str(), 1);
 
-        log_event("Executing CGI script: " + path + " for client " + client_ip, LOG_INFO);
+        char hostname[1024];
+        gethostname(hostname, sizeof(hostname));
+        setenv("SERVER_NAME", hostname, 1);
+        setenv("SERVER_PORT", std::to_string(port).c_str(), 1);
+        setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
+
+        // Execute the CGI script
         execl(path.c_str(), path.c_str(), NULL);
-        exit(0);
-    } else if (pid > 0) {
-        log_event("Forked CGI process with PID: " + std::to_string(pid), LOG_INFO);
-        // Parent process
-        close(pipe_in[0]);
-        close(pipe_out[1]);
 
-        // Use the configurable timeout value
-        alarm(client_timeout);
+        // If execl fails
+        log_event("Failed to execute CGI script: " + path, LOG_ERR);
+        _exit(1);
+    } else { // Parent process
+        close(pipe_in[0]);  // Close unused read end
+        close(pipe_out[1]); // Close unused write end
 
         write(pipe_in[1], post_data.c_str(), post_data.size());
-        close(pipe_in[1]);
+        close(pipe_in[1]); // Done writing
 
+        // Read output from CGI script
         char buffer[buffer_size];
-        std::memset(buffer, 0, buffer_size);
-        read(pipe_out[0], buffer, buffer_size);
+        std::string output;
+        ssize_t bytes_read;
+        while ((bytes_read = read(pipe_out[0], buffer, sizeof(buffer) - 1)) > 0) {
+            buffer[bytes_read] = '\0';
+            output += buffer;
+        }
         close(pipe_out[0]);
 
-        // Cancel the alarm after reading the output
-        alarm(0);
+        int status;
+        waitpid(pid, &status, 0);  // Wait for the child process to finish
 
-        return std::string(buffer);
-    } else {
-        // Fork failed
-        log_event("Failed to fork CGI process", LOG_ERR);
-        return "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+        return output;
     }
 }
+
 
 void Server::send_service_unavailable(int client_socket) {
     Response response;
@@ -246,7 +305,6 @@ void Server::send_service_unavailable(int client_socket) {
 
 void Server::log_event(const std::string& message, int log_level) {
     syslog(log_level, "%s", message.c_str());
-    std::cout << message << std::endl;
 }
 
 void Server::cleanup() {

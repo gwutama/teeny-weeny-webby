@@ -1,9 +1,10 @@
 # Set the source files
 set(SOURCES
     Configuration.cpp
-        FileUtils.cpp
+    FileUtils.cpp
     GuidGenerator.cpp
     MultipartParser.cpp
+    RawResponse.cpp
     Request.cpp
     Response.cpp
     Server.cpp

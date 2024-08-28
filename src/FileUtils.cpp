@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <unistd.h>
 
 std::string FileUtils::get_file_extension(const std::string& path) {
     size_t dot_pos = path.find_last_of(".");
@@ -38,4 +39,8 @@ void FileUtils::save_file(const std::string& filename, const std::vector<unsigne
         file.write(reinterpret_cast<const char*>(content.data()), content.size());
         file.close();
     }
+}
+
+bool FileUtils::file_exists_and_is_executable(const std::string& path) {
+    return access(path.c_str(), F_OK | X_OK) == 0;
 }

@@ -4,7 +4,7 @@
 #include <string>
 
 #include "ThreadPool.h"
-#include "Response.h"
+#include "ResponseBase.h"
 #include "Request.h"
 
 class Server {
@@ -27,8 +27,8 @@ private:
     ThreadPool thread_pool;
     void setup_socket();
     void handle_client(int client_socket, const std::string& client_ip);
-    Response handle_get_request(const Request& request, const std::string& client_ip);
-    Response handle_post_request(const Request& request, const std::string& client_ip);
+    std::unique_ptr<ResponseBase> handle_get_request(const Request& request, const std::string& client_ip);
+    std::unique_ptr<ResponseBase> handle_post_request(const Request& request, const std::string& client_ip);
     std::string execute_cgi(const std::string& path, const std::string& query_string, const std::string& post_data, const std::string& request_method, const std::string& content_type, int content_length, const std::string& client_ip);
     void send_service_unavailable(int client_socket);
     void log_event(const std::string& message, int log_level);
