@@ -1,3 +1,4 @@
+#include <iostream>
 #include <syslog.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -175,7 +176,7 @@ std::unique_ptr<ResponseBase> Server::handle_post_request(const Request& request
         std::string script_name = path.substr(8);
         std::string cgi_script_path = cgi_bin_dir + script_name;
 
-        std::string cgi_output = execute_cgi(path, "", post_data, "POST", content_type, content_length, client_ip);
+        std::string cgi_output = execute_cgi(cgi_script_path, "", post_data, "POST", content_type, content_length, client_ip);
 
         auto response = std::make_unique<RawResponse>();
         response->set_raw_response(cgi_output);
@@ -311,6 +312,7 @@ void Server::send_service_unavailable(int client_socket) {
 
 void Server::log_event(const std::string& message, int log_level) {
     syslog(log_level, "%s", message.c_str());
+    std::cout << message << std::endl;
 }
 
 void Server::cleanup() {
